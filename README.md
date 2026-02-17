@@ -64,6 +64,519 @@ A comprehensive, production-ready clinic management system built with FastAPI, P
 - Secure password hashing with bcrypt
 - Token expiration and refresh
 
+## 📊 System Architecture & Data Flow
+
+### 🏗️ Overall System Architecture
+
+```mermaid
+flowchart TB
+    Client[Client Application]
+
+    subgraph FastAPI["FastAPI Backend"]
+        Auth[Authentication Layer<br/>JWT Verification]
+        Router[API Routers]
+        Services[Business Logic Services]
+    end
+
+    subgraph Databases["Data Storage Layer"]
+        PG[(PostgreSQL<br/>Relational Data)]
+        Mongo[(MongoDB<br/>Logs & Analytics)]
+        Redis[(Redis<br/>Queue & Cache)]
+    end
+
+    Client -->|HTTP/HTTPS| Auth
+    Auth -->|Valid Token| Router
+    Router --> Services
+
+    Services -->|CRUD Operations| PG
+    Services -->|Audit Logs| Mongo
+    Services -->|Visit History| Mongo
+    Services -->|Stock Movements| Mongo
+    Services -->|Queue Management| Redis
+
+    PG -->|Patients, Appointments<br/>Visits, Prescriptions<br/>Inventory, Billing| Services
+    Mongo -->|Analytics<br/>Reports| Services
+    Redis -->|Real-time Queue<br/>Status| Services
+
+    style FastAPI fill:#e1f5ff
+    style Databases fill:#fff3e0
+    style Client fill:#f3e5f5
+```
+
+### 🔐 Authentication Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI
+    participant Auth as Auth Service
+    participant PG as PostgreSQL
+
+    C->>API: POST /auth/login<br/>(username, password)
+    API->>Auth: Validate credentials
+    Auth->>PG: Query user by username
+    PG-->>Auth: User data
+    Auth->>Auth: Verify password hash (bcrypt)
+
+    alt Valid Credentials
+        Auth->>Auth: Generate JWT Token
+        Auth-->>API: Access Token + User Info
+        API-->>C: 200 OK<br/>{access_token, user}
+        C->>API: Subsequent requests<br/>Header: Authorization: Bearer {token}
+        API->>Auth: Verify JWT token
+        Auth->>Auth: Check expiration & signature
+        Auth-->>API: User context
+        API->>API: Check role permissions
+        API-->>C: Protected resource
+    else Invalid Credentials
+        Auth-->>API: Authentication failed
+        API-->>C: 401 Unauthorized
+    end
+```
+
+### 👥 Complete Patient Journey Flow
+
+```mermaid
+flowchart TD
+    Start([Patient Arrival])
+
+    Start --> CheckReg{Registered<br/>Patient?}
+
+    CheckReg -->|No| RegPatient[POST /patients<br/>Register New Patient]
+    CheckReg -->|Yes| SearchPatient[GET /patients?search<br/>Find Patient]
+
+    RegPatient --> PG1[(PostgreSQL<br/>Save Patient)]
+    SearchPatient --> PG1
+
+    PG1 --> CheckAppt{Has<br/>Appointment?}
+
+    CheckAppt -->|No| WalkIn[POST /queue/walk-in<br/>Add to Queue]
+    CheckAppt -->|Yes| CheckIn[POST /queue/checkin<br/>Check-in with Appointment]
+
+    WalkIn --> Redis1[(Redis<br/>Queue Management)]
+    CheckIn --> Redis1
+
+    Redis1 --> Queue[GET /queue/today<br/>View Queue Status]
+    Queue --> CallNext[POST /queue/next<br/>Call Next Patient]
+
+    CallNext --> StartVisit[POST /visits<br/>Start Consultation]
+    StartVisit --> PG2[(PostgreSQL<br/>Visit Record)]
+
+    PG2 --> RecordVitals[PATCH /visits/{id}<br/>Record Vitals & Notes]
+    RecordVitals --> AddNotes[POST /visits/{id}/notes<br/>Clinical Notes]
+
+    AddNotes --> CreatePrescription[POST /prescriptions<br/>Create Prescription]
+    CreatePrescription --> PG3[(PostgreSQL<br/>Prescription)]
+
+    PG3 --> CompleteVisit[POST /visits/{id}/complete<br/>Complete Visit]
+    CompleteVisit --> Mongo1[(MongoDB<br/>Visit History)]
+
+    Mongo1 --> GenerateBill[POST /billing<br/>Generate Invoice]
+    GenerateBill --> PG4[(PostgreSQL<br/>Invoice)]
+
+    PG4 --> Payment[POST /billing/{id}/pay<br/>Process Payment]
+
+    Payment --> CheckDispense{Medicines<br/>Prescribed?}
+
+    CheckDispense -->|Yes| Dispense[POST /dispensing<br/>Dispense Medicines]
+    CheckDispense -->|No| End
+
+    Dispense --> UpdateStock[PATCH /inventory/batches<br/>Update Stock FIFO]
+    UpdateStock --> PG5[(PostgreSQL<br/>Inventory)]
+    UpdateStock --> Mongo2[(MongoDB<br/>Stock Movement)]
+
+    PG5 --> End([Process Complete])
+    Mongo2 --> End
+
+    style Start fill:#4caf50,color:#fff
+    style End fill:#2196f3,color:#fff
+    style PG1 fill:#ff9800
+    style PG2 fill:#ff9800
+    style PG3 fill:#ff9800
+    style PG4 fill:#ff9800
+    style PG5 fill:#ff9800
+    style Redis1 fill:#e91e63
+    style Mongo1 fill:#00bcd4
+    style Mongo2 fill:#00bcd4
+```
+
+### 📅 Appointment & Queue Management Flow
+
+```mermaid
+flowchart LR
+    subgraph Admin["Admin/Doctor"]
+        CreateSlots[POST /slots/bulk<br/>Create Appointment Slots]
+        BlockSlot[PATCH /slots/{id}/block<br/>Block Unavailable Slots]
+    end
+
+    subgraph Reception["Reception"]
+        BookAppt[POST /appointments<br/>Book Appointment]
+        CheckInAppt[POST /queue/checkin<br/>Check-in Patient]
+        AddWalkIn[POST /queue/walk-in<br/>Add Walk-in]
+        ViewQueue[GET /queue/today<br/>Monitor Queue]
+    end
+
+    subgraph Doctor["Doctor"]
+        CallNext[POST /queue/next<br/>Call Next Patient]
+        UpdateStatus[PATCH /queue/{token}/status<br/>Update Patient Status]
+    end
+
+    CreateSlots --> PG1[(PostgreSQL<br/>Slots Table)]
+    BlockSlot --> PG1
+
+    PG1 --> BookAppt
+    BookAppt --> PG2[(PostgreSQL<br/>Appointments)]
+
+    PG2 --> CheckInAppt
+    CheckInAppt --> Redis1[(Redis<br/>Queue: Sorted Set<br/>Token Details)]
+
+    AddWalkIn --> Redis1
+
+    Redis1 --> ViewQueue
+    ViewQueue --> CallNext
+    CallNext --> UpdateStatus
+
+    UpdateStatus --> Redis1
+
+    style PG1 fill:#ff9800
+    style PG2 fill:#ff9800
+    style Redis1 fill:#e91e63
+```
+
+### 💊 Prescription & Dispensing Flow
+
+```mermaid
+flowchart TD
+    Doctor[Doctor Creates Prescription]
+
+    Doctor --> CreatePx[POST /prescriptions<br/>Medicine Details + Dosage]
+    CreatePx --> PG1[(PostgreSQL<br/>Prescriptions Table)]
+
+    PG1 --> ViewPx[GET /prescriptions/{id}<br/>View Prescription]
+    ViewPx --> PrintPx[GET /prescriptions/{id}/print<br/>Print Format]
+
+    PrintPx --> Pharmacist{Pharmacist<br/>Reviews}
+
+    Pharmacist --> Dispense[POST /dispensing<br/>Dispense Medicines]
+
+    Dispense --> CheckStock[GET /inventory/medicines<br/>Check Stock Availability]
+    CheckStock --> PG2[(PostgreSQL<br/>Medicine Batches)]
+
+    PG2 --> FIFOLogic[Business Logic:<br/>FIFO - First Expiry First Out]
+
+    FIFOLogic --> DeductStock[PATCH /inventory/batches/{id}<br/>Deduct Stock from Batch]
+
+    DeductStock --> PG3[(PostgreSQL<br/>Update Batch Quantity)]
+    DeductStock --> Mongo1[(MongoDB<br/>Log Stock Movement)]
+
+    PG3 --> CheckLowStock{Stock Below<br/>Reorder Level?}
+
+    CheckLowStock -->|Yes| Alert[GET /inventory/low-stock<br/>Generate Alert]
+    CheckLowStock -->|No| Complete
+
+    Alert --> Complete([Dispensing Complete])
+
+    Mongo1 --> Analytics[Reports Service<br/>Stock Analytics]
+
+    style Doctor fill:#4caf50,color:#fff
+    style Complete fill:#2196f3,color:#fff
+    style PG1 fill:#ff9800
+    style PG2 fill:#ff9800
+    style PG3 fill:#ff9800
+    style Mongo1 fill:#00bcd4
+```
+
+### 💰 Billing Flow (Auto & Manual Modes)
+
+```mermaid
+flowchart TD
+    Start{Billing Mode?}
+
+    Start -->|Auto Mode| AutoBill[POST /billing<br/>mode: AUTO<br/>prescription_id]
+    Start -->|Manual Mode| ManualBill[POST /billing<br/>mode: MANUAL<br/>custom line items]
+
+    AutoBill --> FetchPx[Fetch Prescription Details]
+    FetchPx --> PG1[(PostgreSQL<br/>Prescriptions)]
+
+    PG1 --> CalcAuto[Calculate Total<br/>from Medicine Prices]
+
+    ManualBill --> CalcManual[Calculate Total<br/>from Line Items]
+
+    CalcAuto --> ApplyCalc[Apply Tax & Discounts]
+    CalcManual --> ApplyCalc
+
+    ApplyCalc --> CreateInvoice[Create Invoice Record]
+    CreateInvoice --> PG2[(PostgreSQL<br/>Invoices Table<br/>Status: PENDING)]
+
+    PG2 --> ViewInvoice[GET /billing/{id}<br/>View Invoice]
+
+    ViewInvoice --> ProcessPayment{Payment<br/>Received?}
+
+    ProcessPayment -->|Yes| PayInvoice[POST /billing/{id}/pay<br/>payment_method]
+    ProcessPayment -->|No| WaitPayment[Status: PENDING]
+
+    PayInvoice --> UpdateStatus[Update Invoice<br/>Status: PAID<br/>paid_at: timestamp]
+
+    UpdateStatus --> PG3[(PostgreSQL<br/>Update Invoice)]
+    UpdateStatus --> Mongo1[(MongoDB<br/>Audit Log)]
+
+    PG3 --> PrintReceipt[Generate Receipt]
+    Mongo1 --> DailySummary[Update Daily Summary]
+
+    PrintReceipt --> End([Billing Complete])
+    DailySummary --> End
+
+    style Start fill:#9c27b0,color:#fff
+    style End fill:#2196f3,color:#fff
+    style PG1 fill:#ff9800
+    style PG2 fill:#ff9800
+    style PG3 fill:#ff9800
+    style Mongo1 fill:#00bcd4
+```
+
+### 📊 MongoDB Analytics & Logging Flow
+
+```mermaid
+flowchart LR
+    subgraph Events["System Events"]
+        E1[User Actions<br/>CREATE/UPDATE/DELETE]
+        E2[Visit Completed]
+        E3[Stock Movement]
+        E4[Daily Rollup]
+    end
+
+    subgraph MongoCollections["MongoDB Collections"]
+        AL[(audit_logs<br/>Indexed by:<br/>- timestamp<br/>- user.id<br/>- resource.type)]
+
+        VH[(visit_history<br/>Indexed by:<br/>- patient.id<br/>- visit_date<br/>- visit_id unique)]
+
+        SM[(stock_movements<br/>Indexed by:<br/>- medicine.id<br/>- timestamp<br/>- movement_type)]
+
+        DS[(daily_summaries<br/>Indexed by:<br/>- date unique)]
+    end
+
+    subgraph Reports["Reports API"]
+        R1[GET /reports/audit-logs]
+        R2[GET /reports/visit-history]
+        R3[GET /reports/stock-movements]
+        R4[GET /reports/daily-summary]
+    end
+
+    E1 -->|Log every action| AL
+    E2 -->|Store complete visit| VH
+    E3 -->|Track inventory change| SM
+    E4 -->|Aggregate stats| DS
+
+    AL --> R1
+    VH --> R2
+    SM --> R3
+    DS --> R4
+
+    R1 --> Analytics[Analytics Dashboard]
+    R2 --> Analytics
+    R3 --> Analytics
+    R4 --> Analytics
+
+    style AL fill:#00bcd4
+    style VH fill:#00bcd4
+    style SM fill:#00bcd4
+    style DS fill:#00bcd4
+```
+
+### 🔄 Redis Queue Real-Time Operations
+
+```mermaid
+flowchart TD
+    subgraph QueueOps["Queue Operations"]
+        CheckIn[Check-in Patient<br/>POST /queue/checkin]
+        WalkIn[Walk-in Patient<br/>POST /queue/walk-in]
+    end
+
+    CheckIn --> Token[Generate Token<br/>Format: date-number]
+    WalkIn --> Token
+
+    Token --> Redis1{Redis Operations}
+
+    Redis1 -->|INCR| Counter[queue:counter:2026-02-17<br/>Increment counter]
+    Redis1 -->|ZADD| SortedSet[queue:2026-02-17<br/>Add to sorted set<br/>Score: timestamp]
+    Redis1 -->|HSET| TokenData[queue:token:2026-02-17:001<br/>Store patient details<br/>status: WAITING]
+
+    Counter --> Display[Display on Screen]
+    SortedSet --> Display
+    TokenData --> Display
+
+    Display --> Monitor[Reception Monitors<br/>GET /queue/today]
+
+    Monitor --> CallNext[Doctor Calls Next<br/>POST /queue/next]
+
+    CallNext --> Redis2{Redis Operations}
+
+    Redis2 -->|ZRANGE| GetFirst[Get first in queue]
+    Redis2 -->|HSET| UpdateStatus[Update status: WITH_DOCTOR]
+    Redis2 -->|SET| SetCurrent[queue:current:2026-02-17<br/>Set current token]
+
+    GetFirst --> Notify[Notify Patient]
+    UpdateStatus --> Notify
+    SetCurrent --> Notify
+
+    Notify --> Complete[Consultation Complete]
+
+    Complete --> Redis3{Redis Operations}
+    Redis3 -->|HSET| FinalStatus[Update status: COMPLETED]
+    Redis3 -->|ZREM| RemoveFromQueue[Remove from queue]
+
+    FinalStatus --> NextPatient[Next Patient]
+    RemoveFromQueue --> NextPatient
+
+    style Redis1 fill:#e91e63
+    style Redis2 fill:#e91e63
+    style Redis3 fill:#e91e63
+    style Token fill:#4caf50,color:#fff
+    style NextPatient fill:#2196f3,color:#fff
+```
+
+### 🗄️ Database Schema Overview
+
+```mermaid
+erDiagram
+    USERS ||--o{ APPOINTMENTS : creates
+    USERS ||--o{ VISITS : conducts
+    USERS {
+        int id PK
+        string username
+        string email
+        string password_hash
+        enum role
+        timestamp created_at
+    }
+
+    PATIENTS ||--o{ APPOINTMENTS : books
+    PATIENTS ||--o{ VISITS : has
+    PATIENTS {
+        int id PK
+        string name
+        string phone
+        date date_of_birth
+        string address
+        json allergies
+        json chronic_conditions
+        timestamp created_at
+    }
+
+    APPOINTMENTS ||--|| SLOTS : uses
+    APPOINTMENTS ||--o| VISITS : converts_to
+    APPOINTMENTS {
+        int id PK
+        int patient_id FK
+        int slot_id FK
+        enum status
+        string notes
+        timestamp created_at
+    }
+
+    SLOTS ||--|| USERS : assigned_to
+    SLOTS {
+        int id PK
+        int doctor_id FK
+        date date
+        time start_time
+        time end_time
+        boolean is_blocked
+        string block_reason
+    }
+
+    VISITS ||--o{ PRESCRIPTIONS : generates
+    VISITS ||--o{ CLINICAL_NOTES : contains
+    VISITS {
+        int id PK
+        int patient_id FK
+        int doctor_id FK
+        int appointment_id FK
+        json vitals
+        string chief_complaint
+        string diagnosis
+        string treatment_plan
+        enum status
+        timestamp created_at
+    }
+
+    PRESCRIPTIONS ||--o{ PRESCRIPTION_ITEMS : contains
+    PRESCRIPTIONS ||--o| INVOICES : billed_in
+    PRESCRIPTIONS {
+        int id PK
+        int visit_id FK
+        int patient_id FK
+        int doctor_id FK
+        timestamp created_at
+    }
+
+    PRESCRIPTION_ITEMS }|--|| MEDICINES : prescribes
+    PRESCRIPTION_ITEMS {
+        int id PK
+        int prescription_id FK
+        int medicine_id FK
+        string dosage
+        string frequency
+        int duration_days
+        string instructions
+    }
+
+    MEDICINES ||--o{ MEDICINE_BATCHES : has
+    MEDICINES {
+        int id PK
+        string name
+        string generic_name
+        string manufacturer
+        decimal unit_price
+        int reorder_level
+    }
+
+    MEDICINE_BATCHES ||--o{ DISPENSING_ITEMS : dispensed_from
+    MEDICINE_BATCHES {
+        int id PK
+        int medicine_id FK
+        string batch_number
+        int quantity
+        date expiry_date
+        decimal cost_price
+        timestamp created_at
+    }
+
+    INVOICES ||--o{ INVOICE_ITEMS : contains
+    INVOICES ||--o| DISPENSING : triggers
+    INVOICES {
+        int id PK
+        int patient_id FK
+        int prescription_id FK
+        enum mode
+        decimal subtotal
+        decimal discount
+        decimal tax
+        decimal total
+        enum status
+        enum payment_method
+        timestamp paid_at
+    }
+
+    DISPENSING ||--o{ DISPENSING_ITEMS : contains
+    DISPENSING {
+        int id PK
+        int prescription_id FK
+        int invoice_id FK
+        int pharmacist_id FK
+        timestamp dispensed_at
+    }
+
+    DISPENSING_ITEMS {
+        int id PK
+        int dispensing_id FK
+        int medicine_id FK
+        int batch_id FK
+        int quantity
+        decimal unit_price
+    }
+```
+
 ## 🛠️ Tech Stack
 
 ### Backend
