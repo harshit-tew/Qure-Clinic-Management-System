@@ -1,4 +1,4 @@
-# 🏥 Qure Clinic Management System
+# Qure Clinic Management System
 
 A complete clinic management platform with integrated pharmacy, real-time queue management, and comprehensive analytics built with FastAPI, PostgreSQL, MongoDB, and Redis.
 
@@ -10,197 +10,278 @@ A complete clinic management platform with integrated pharmacy, real-time queue 
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-- [Overview](#-overview)
-- [Features](#-features)
-- [System Architecture](#-system-architecture)
-- [Tech Stack](#-tech-stack)
-- [Quick Start](#-quick-start)
-- [Database Design](#-database-design)
-- [API Documentation](#-api-documentation)
-- [User Roles](#-user-roles)
-- [Workflows](#-workflows)
-- [Development](#-development)
-- [Security](#-security)
+- [Overview](#overview)
+- [How It Works](#how-it-works)
+- [Features](#features)
+- [System Architecture](#system-architecture)
+- [Tech Stack](#tech-stack)
+- [Quick Start](#quick-start)
+- [Database Design](#database-design)
+- [API Documentation](#api-documentation)
+- [User Roles](#user-roles)
+- [Workflows](#workflows)
+- [Development](#development)
+- [Security](#security)
 
 ---
 
-## 🎯 Overview
+## Overview
 
-Qure is an end-to-end clinic management system designed to streamline healthcare operations. It manages the complete patient journey from registration through consultation, prescription, billing, and pharmacy dispensing.
+Qure is an end-to-end clinic management system designed to streamline healthcare operations. It manages the complete patient journey from registration through consultation, prescription, billing, and pharmacy dispensing — all in a single connected system.
 
 ### What Problems Does It Solve?
 
-- **Patient Management** - Centralized patient records with medical history
-- **Appointment Chaos** - Slot-based scheduling prevents overbooking
-- **Queue Confusion** - Token-based queue system with real-time updates
-- **Paper Prescriptions** - Digital prescriptions with dosage tracking
-- **Inventory Issues** - FIFO-based stock management with expiry alerts
-- **Billing Errors** - Automated billing from prescriptions
-- **No Audit Trail** - Comprehensive logging of all actions
-
-### Key Highlights
-
-✅ **Real-time Queue** - Redis-powered token system for managing patient flow
-✅ **Multi-Database Architecture** - PostgreSQL for data, MongoDB for analytics, Redis for cache
-✅ **Role-Based Access** - Four user roles with specific permissions
-✅ **FIFO Dispensing** - Automatic batch selection based on expiry dates
-✅ **Comprehensive Audit** - Every action logged with user, timestamp, and changes
-✅ **Automated Billing** - Generate invoices directly from prescriptions
+- **Patient Management** — Centralized patient records with full medical history
+- **Appointment Chaos** — Slot-based scheduling prevents double-booking
+- **Queue Confusion** — Token-based queue system with real-time updates via Redis
+- **Paper Prescriptions** — Digital prescriptions with dosage tracking
+- **Inventory Issues** — FIFO-based stock management with expiry alerts
+- **Billing Errors** — Automated billing generated directly from prescriptions
+- **No Audit Trail** — Every action logged with user, timestamp, and changes
 
 ---
 
-## ✨ Features
+## How It Works
 
-### 👥 Patient Management
+This section explains the full flow of the system in plain terms — from when a patient walks in to when they leave.
+
+### The Patient Journey at a Glance
+
+```
+Patient Arrives
+      |
+      +--> New Patient? ---> Register (name, DOB, phone, allergies, etc.)
+      |
+      +--> Existing? ------> Search by name / phone / ID
+      |
+      v
+Check-in at Reception
+      |
+      +--> Has Appointment? ---> Check-in against appointment slot
+      |
+      +--> Walk-in? -----------> Added directly to queue
+      |
+      v
+Token Issued (Redis Queue)
+      |
+      v
+Patient Waits --> Doctor Calls Next Token
+      |
+      v
+Consultation Begins
+      |
+      +--> Vitals recorded (BP, temp, pulse, SpO2, weight, height)
+      +--> Chief complaint noted
+      +--> Clinical notes added (symptoms, observations, diagnosis, treatment)
+      +--> Diagnosis and treatment plan saved
+      |
+      v
+Prescription Created (if medicines needed)
+      |
+      v
+Visit Marked Complete --> Full record saved to MongoDB
+      |
+      v
+Invoice Generated
+      |
+      +--> AUTO mode: pulls medicine prices from prescription automatically
+      +--> MANUAL mode: reception adds consultation fee + custom charges
+      |
+      v
+Patient Pays (Cash / Card / UPI)
+      |
+      v
+Pharmacist Dispenses Medicines (FIFO — earliest expiry batch first)
+      |
+      v
+Stock Deducted --> Movement logged to MongoDB --> Low-stock alert if needed
+      |
+      v
+Patient Receives Medicines + Receipt --> Journey Complete
+```
+
+### Three Databases, Three Purposes
+
+The system uses three databases, each chosen for what it does best:
+
+**PostgreSQL** is the source of truth for all operational data. Every patient, appointment, visit, prescription, invoice, and stock batch lives here. It handles transactions, enforces foreign keys, and ensures data consistency.
+
+**MongoDB** handles analytics and audit logs. When a visit completes, a full snapshot is written to `visit_history`. Every user action (create, update, delete, payment) is logged to `audit_logs`. Stock movements are recorded in `stock_movements`. At end of day, totals are aggregated into `daily_summaries`. MongoDB's flexible schema makes it ideal for these varied, write-heavy records.
+
+**Redis** powers the real-time queue. When a patient checks in, a token is minted using an atomic counter (`INCR`), stored in a sorted set (`ZADD`) ordered by check-in time, and their details saved in a hash. When the doctor calls the next patient, Redis returns the first token in O(1) time. The currently-serving token is stored as a plain string key. This keeps the queue fast and free of database load.
+
+### Role-Based Access
+
+Four roles control what each user can do:
+
+| Role | Responsible for |
+|------|----------------|
+| **Admin** | User management, full system access, all reports |
+| **Doctor** | Appointments, consultations, prescriptions, calling queue |
+| **Pharmacist** | Inventory, dispensing, stock batches |
+| **Reception** | Patient registration, check-in, queue management, billing |
+
+Each API endpoint checks the JWT token's role before allowing access. A pharmacist cannot create a prescription; a doctor cannot dispense medicines.
+
+### Authentication
+
+Every request requires a JWT bearer token. Logging in returns a token valid for 30 minutes. The token contains the user's ID and role, which the API reads on every request — no extra database round-trip needed to check permissions.
+
+---
+
+## Features
+
+### Patient Management
 - Complete patient registration with medical history
 - Search by name, phone, or ID
 - Track allergies and chronic conditions
 - Emergency contact information
 - View complete visit history
 
-### 📅 Appointments & Scheduling
+### Appointments & Scheduling
 - Doctor availability slots (15/30 min intervals)
 - Bulk slot creation for multiple days
 - Block slots for breaks or unavailability
 - Appointment booking with conflict prevention
 - Walk-in patient support
 
-### 🎫 Queue Management
-- Token-based queue system
-- Real-time status updates
-- Priority for appointment patients
-- Display current token on screens
-- Queue statistics and summaries
+### Queue Management
+- Token-based queue system backed by Redis
+- Real-time status updates (WAITING → WITH_DOCTOR → COMPLETED)
+- Priority for appointment patients over walk-ins
+- Display current token for screens
+- Queue statistics and daily summaries
 
-### 🏥 Clinical Consultations
-- Record vital signs (BP, temp, pulse, SpO2, weight, height)
-- Chief complaints and symptoms
-- Clinical notes with categories (symptom, observation, diagnosis, treatment)
+### Clinical Consultations
+- Record vital signs (BP, temperature, pulse, SpO2, weight, height)
+- Chief complaints and symptom duration
+- Clinical notes with categories: SYMPTOM, OBSERVATION, DIAGNOSIS, TREATMENT
 - Diagnosis and treatment plans
-- Complete visit history
+- Complete visit history stored in MongoDB
 
-### 💊 Prescriptions & Pharmacy
-- Digital prescription creation
-- Medicine dosage, frequency, and duration
-- Special instructions for each medicine
+### Prescriptions & Pharmacy
+- Digital prescription creation linked to the visit
+- Medicine dosage, frequency, duration, and special instructions
 - Printable prescription format
-- FIFO-based dispensing (First Expiry, First Out)
-- Automatic inventory deduction
+- FIFO-based dispensing (earliest expiry first)
+- Automatic inventory deduction on dispensing
 
-### 📦 Inventory Management
-- Medicine catalog with generic names
-- Batch tracking with expiry dates
-- Stock level monitoring
-- Reorder level alerts
-- Stock movement logging
-- Expiry date alerts (30/60/90 days)
+### Inventory Management
+- Medicine catalog with generic names and dosage forms
+- Batch tracking with expiry dates and supplier info
+- Stock level monitoring with reorder alerts
+- Stock movement logging (IN / OUT / ADJUSTMENT)
+- Expiry alerts at 30, 60, and 90 days
 
-### 💰 Billing & Invoicing
-- **AUTO Mode**: Generate bill from prescription automatically
-- **MANUAL Mode**: Custom billing for procedures/tests
-- Tax and discount calculations
-- Multiple payment methods (Cash, Card, UPI)
-- Invoice status tracking
-- Receipt generation
+### Billing & Invoicing
+- **AUTO mode** — invoice generated directly from prescription line items
+- **MANUAL mode** — custom billing for procedures, tests, consultation fees
+- Tax (GST) and discount calculations
+- Multiple payment methods: Cash, Card, UPI
+- Invoice status: DRAFT → PENDING → PAID
 
-### 📊 Analytics & Reports
-- Audit logs (all user actions)
-- Visit history with prescriptions
+### Analytics & Reports
+- Audit logs (all user actions with before/after values)
+- Visit history with full prescription snapshots
 - Stock movement reports
-- Daily summaries (patients, revenue, medicines dispensed)
-- Top medicines and diagnoses
+- Daily summaries: patients seen, revenue, medicines dispensed
 
 ---
 
-## 🏗️ System Architecture
+## System Architecture
 
-### High-Level Architecture
-
-```mermaid
-graph TB
-    Client[Client]
-
-    subgraph Backend
-        API[FastAPI]
-        Auth[JWT Auth]
-        Routes[Routes]
-        Services[Services]
-    end
-
-    subgraph Data
-        PG[(PostgreSQL)]
-        Mongo[(MongoDB)]
-        Redis[(Redis)]
-    end
-
-    Client --> API
-    API --> Auth
-    Auth --> Routes
-    Routes --> Services
-
-    Services --> PG
-    Services --> Mongo
-    Services --> Redis
+```
+                        ┌─────────────────────────┐
+                        │      Client Layer        │
+                        │  Web  |  Mobile  | Admin │
+                        └──────────┬──────────────┘
+                                   │ HTTP requests
+                                   v
+                        ┌─────────────────────────┐
+                        │      FastAPI App         │
+                        │                         │
+                        │  JWT Auth Middleware     │
+                        │         │               │
+                        │         v               │
+                        │    API Routers          │
+                        │  auth | patients |      │
+                        │  appointments | visits  │
+                        │  prescriptions | billing│
+                        │  inventory | queue |    │
+                        │  reports               │
+                        │         │               │
+                        │         v               │
+                        │  Business Logic /       │
+                        │  Services               │
+                        └────┬─────────┬──────┬───┘
+                             │         │      │
+                    ┌────────▼──┐ ┌────▼───┐ ┌▼──────┐
+                    │PostgreSQL │ │MongoDB │ │ Redis │
+                    │Operational│ │Analytics│ │Queue  │
+                    │  Data     │ │& Logs  │ │&Cache │
+                    └───────────┘ └────────┘ └───────┘
 ```
 
-### Data Flow
+### What Each Database Stores
 
-**PostgreSQL** handles all operational data:
-- Users, Patients, Appointments, Visits
-- Prescriptions, Medicines, Inventory
-- Billing, Invoices, Dispensing
+**PostgreSQL** (primary relational store):
+- `users`, `patients`, `slots`, `appointments`, `visits`, `clinical_notes`
+- `prescriptions`, `prescription_items`, `medicines`, `medicine_batches`
+- `invoices`, `invoice_items`, `dispensing`, `dispensing_items`
 
-**MongoDB** stores analytics and logs:
-- Audit logs (user actions)
-- Visit history (complete records)
-- Stock movements (inventory changes)
-- Daily summaries (aggregated stats)
+**MongoDB** (analytics and audit):
+- `audit_logs` — every user action with old/new values
+- `visit_history` — complete visit snapshots including vitals and prescriptions
+- `stock_movements` — every stock IN/OUT with batch details
+- `daily_summaries` — aggregated daily stats for dashboards
 
-**Redis** manages real-time operations:
-- Queue management (sorted sets)
-- Token generation (counters)
-- Current serving token (strings)
-- Session cache
+**Redis** (real-time queue):
+```
+queue:YYYY-MM-DD            → Sorted set  (tokens ordered by check-in time)
+queue:token:YYYY-MM-DD:NNN  → Hash        (patient info, status, timestamps)
+queue:counter:YYYY-MM-DD    → Integer     (auto-incrementing token number)
+queue:current:YYYY-MM-DD    → String      (token currently being seen)
+```
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 ### Backend
-- **FastAPI 0.115.5** - Modern async web framework
-- **Python 3.9+** - Programming language
-- **Pydantic** - Data validation and settings
-- **SQLAlchemy 2.0** - Async ORM
-- **Alembic** - Database migrations
+- **FastAPI 0.115.5** — Modern async web framework
+- **Python 3.9+** — Programming language
+- **Pydantic** — Data validation and settings management
+- **SQLAlchemy 2.0** — Async ORM
+- **Alembic** — Database migrations
 
 ### Databases
-- **PostgreSQL 16** - Primary relational database
-- **MongoDB 7** - Document store for analytics
-- **Redis 7** - In-memory cache and queue
+- **PostgreSQL 16** — Primary relational database
+- **MongoDB 7** — Document store for analytics and logs
+- **Redis 7** — In-memory cache and queue
 
 ### Authentication & Security
-- **JWT** - Token-based authentication
-- **Bcrypt** - Password hashing
-- **python-jose** - JWT encoding/decoding
-- **passlib** - Password utilities
+- **JWT** — Token-based authentication
+- **Bcrypt** — Password hashing
+- **python-jose** — JWT encoding/decoding
+- **passlib** — Password utilities
 
 ### Infrastructure
-- **Docker** - Containerization
-- **Docker Compose** - Multi-container orchestration
-- **Uvicorn** - ASGI server
+- **Docker** — Containerization
+- **Docker Compose** — Multi-container orchestration
+- **Uvicorn** — ASGI server
 
 ### Python Libraries
-- **asyncpg** - Async PostgreSQL driver
-- **motor** - Async MongoDB driver
-- **redis-py** - Redis client
-- **python-multipart** - Form data handling
-- **email-validator** - Email validation
+- **asyncpg** — Async PostgreSQL driver
+- **motor** — Async MongoDB driver
+- **redis-py** — Redis client
+- **python-multipart** — Form data handling
+- **email-validator** — Email validation
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -239,7 +320,7 @@ This starts:
 
 **5. Create Environment File**
 
-Create `.env` file in the `backend` directory:
+Create `.env` in the `backend` directory:
 ```env
 DATABASE_URL=postgresql+asyncpg://clinic_user:clinic_pass@localhost:5433/clinic_db
 MONGO_URL=mongodb://clinic_admin:clinic_mongo_pass@localhost:27017/
@@ -269,29 +350,31 @@ The API will be available at: **http://localhost:8000**
 
 ---
 
-## 💾 Database Design
+## Database Design
 
 ### PostgreSQL Schema
 
 **Core Tables:**
-- `users` - System users (doctors, staff)
-- `patients` - Patient records
-- `slots` - Doctor availability slots
-- `appointments` - Appointment bookings
-- `visits` - Consultation records
-- `clinical_notes` - Visit notes
+- `users` — System users (doctors, staff, admin, pharmacist, reception)
+- `patients` — Patient records with allergies and emergency contacts
+- `slots` — Doctor availability slots (15/30 min intervals)
+- `appointments` — Appointment bookings linked to a slot and patient
+
+**Clinical:**
+- `visits` — Consultation records with vitals, diagnosis, treatment plan
+- `clinical_notes` — Per-visit notes (SYMPTOM / OBSERVATION / DIAGNOSIS / TREATMENT)
 
 **Prescription & Pharmacy:**
-- `prescriptions` - Prescription headers
-- `prescription_items` - Individual medicines
-- `medicines` - Medicine catalog
-- `medicine_batches` - Stock batches with expiry
+- `prescriptions` — Prescription header linked to visit
+- `prescription_items` — Individual medicines with dosage, frequency, duration
+- `medicines` — Medicine catalog with pricing and reorder levels
+- `medicine_batches` — Stock batches with expiry dates and quantities
 
 **Financial:**
-- `invoices` - Bills and payments
-- `invoice_items` - Line items
-- `dispensing` - Dispensing records
-- `dispensing_items` - Medicines dispensed
+- `invoices` — Bills with subtotal, discount, tax, payment method
+- `invoice_items` — Line items on each invoice
+- `dispensing` — Dispensing records per prescription
+- `dispensing_items` — Per-medicine batch deductions
 
 ### Entity Relationships
 
@@ -314,64 +397,55 @@ erDiagram
 ### MongoDB Collections
 
 **audit_logs**
-```javascript
+```json
 {
-  timestamp: ISODate,
-  user: { id, name, role },
-  action: "CREATE|UPDATE|DELETE",
-  resource: { type, id },
-  changes: { old: {}, new: {} }
+  "timestamp": "ISODate",
+  "user": { "id": 1, "name": "Dr. Smith", "role": "DOCTOR" },
+  "action": "VISIT_COMPLETED",
+  "resource": { "type": "visit", "id": 42 },
+  "changes": { "old": {}, "new": {} }
 }
 ```
 
 **visit_history**
-```javascript
+```json
 {
-  visit_id: int,
-  patient: { id, name, phone },
-  doctor: { id, name },
-  vitals: {},
-  diagnosis: string,
-  prescription: [],
-  visit_date: ISODate
+  "visit_id": 42,
+  "patient": { "id": 1, "name": "John Doe", "phone": "9999999999" },
+  "doctor": { "id": 2, "name": "Dr. Smith" },
+  "vitals": { "bp": "120/80", "temp": "98.6", "pulse": 72 },
+  "diagnosis": "Viral URTI",
+  "prescription": [],
+  "visit_date": "ISODate"
 }
 ```
 
 **stock_movements**
-```javascript
+```json
 {
-  medicine: { id, name },
-  batch_number: string,
-  movement_type: "IN|OUT|ADJUSTMENT",
-  quantity: int,
-  timestamp: ISODate,
-  performed_by: { id, name }
+  "medicine": { "id": 5, "name": "Paracetamol 500mg" },
+  "batch_number": "ABC123",
+  "movement_type": "OUT",
+  "quantity": 10,
+  "timestamp": "ISODate",
+  "performed_by": { "id": 3, "name": "Pharmacist Riya" }
 }
 ```
 
 **daily_summaries**
-```javascript
+```json
 {
-  date: ISODate,
-  total_patients: int,
-  total_visits: int,
-  total_revenue: decimal,
-  medicines_dispensed: int
+  "date": "ISODate",
+  "total_patients": 45,
+  "total_visits": 43,
+  "total_revenue": 18500.00,
+  "medicines_dispensed": 210
 }
-```
-
-### Redis Keys
-
-```
-queue:YYYY-MM-DD                  # Sorted set (timestamp as score)
-queue:token:YYYY-MM-DD:NNN        # Hash (patient details)
-queue:counter:YYYY-MM-DD          # Integer (last token number)
-queue:current:YYYY-MM-DD          # String (current token)
 ```
 
 ---
 
-## 📍 API Documentation
+## API Documentation
 
 ### Authentication
 
@@ -396,7 +470,7 @@ queue:current:YYYY-MM-DD          # String (current token)
 |--------|----------|-------------|
 | POST | `/slots/bulk` | Create multiple slots |
 | GET | `/slots` | List available slots |
-| PATCH | `/slots/{id}/block` | Block/unblock slot |
+| PATCH | `/slots/{id}/block` | Block/unblock a slot |
 | POST | `/appointments` | Book appointment |
 | GET | `/appointments` | List appointments |
 | PATCH | `/appointments/{id}` | Update appointment |
@@ -469,108 +543,192 @@ queue:current:YYYY-MM-DD          # String (current token)
 
 ---
 
-## 👤 User Roles
+## User Roles
 
 ### ADMIN
-**Full system access**
-- Manage users (create, update, delete)
-- Access all patient records
-- View all reports and analytics
-- System configuration
+Full system access:
+- Manage users (create, update, deactivate)
+- Access all patient records and reports
+- View all audit logs and analytics
+- System-wide configuration
 
 ### DOCTOR
-**Clinical operations**
-- View patient records
-- Manage appointments and slots
-- Conduct visits and add notes
-- Create prescriptions
-- View queue and call patients
+Clinical operations:
+- View patient records and history
+- Manage their own appointment slots
+- Conduct visits, record vitals and notes
+- Create and view prescriptions
+- Call patients from queue
 
 ### PHARMACIST
-**Pharmacy operations**
+Pharmacy operations:
 - View prescriptions (read-only)
-- Dispense medicines
-- Manage inventory
-- Add/update stock batches
-- View stock reports
+- Dispense medicines against a paid invoice
+- Manage medicine catalog and stock batches
+- View stock reports and movements
 
 ### RECEPTION
-**Front desk operations**
-- Register patients
-- Book appointments
-- Manage queue (check-in, walk-in)
-- Generate invoices
-- Process payments
+Front desk operations:
+- Register new patients and update records
+- Book and cancel appointments
+- Manage queue (check-in, walk-ins)
+- Generate invoices and process payments
 
 ---
 
-## 🔄 Workflows
+## Workflows
 
-### Complete Patient Journey
+### Patient Journey
 
-```mermaid
-graph LR
-    A[Arrive] --> B[Register]
-    B --> C[Check-in]
-    C --> D[Queue]
-    D --> E[Visit]
-    E --> F[Prescription]
-    F --> G[Billing]
-    G --> H[Payment]
-    H --> I[Dispense]
-    I --> J[Complete]
 ```
-
-**Step-by-step:**
-
-1. **Registration** - Patient arrives and registers (if new) or reception searches existing record
-2. **Check-in** - Patient checks in with appointment or added as walk-in
-3. **Queue** - Token generated and patient joins queue (Redis)
-4. **Visit** - Doctor calls next patient and starts consultation
-5. **Prescription** - Doctor creates prescription with medicines
-6. **Billing** - Invoice generated automatically from prescription
-7. **Payment** - Patient pays via cash/card/UPI
-8. **Dispensing** - Pharmacist dispenses medicines using FIFO
-9. **Complete** - Patient receives medicines and receipt
-
-### Queue Flow
-
-```mermaid
-graph TB
-    A[Patient] --> B{Type?}
-    B -->|Appointment| C[Check-in]
-    B -->|Walk-in| D[Register]
-    C --> E[Token]
-    D --> E
-    E --> F[Wait]
-    F --> G[Called]
-    G --> H[Visit]
+Patient Arrives
+    |
+    +-[New]--------> POST /patients  (register with name, DOB, phone, allergies)
+    |                     |
+    +-[Returning]--> GET /patients?search=...
+                          |
+                          v
+                    Has Appointment?
+                    |              |
+                   Yes             No
+                    |              |
+          POST /queue/checkin   POST /queue/walk-in
+                    \              /
+                     v            v
+               Token issued (Redis INCR + ZADD)
+                          |
+                          v
+               Patient waits in queue
+                          |
+                          v
+               POST /queue/next  (doctor calls)
+                          |
+                    status: WITH_DOCTOR
+                          |
+                          v
+               POST /visits  (create visit record)
+                    |
+                    +--> PATCH /visits/{id}  (record vitals: BP, temp, pulse, SpO2...)
+                    +--> PATCH /visits/{id}  (chief complaint)
+                    +--> POST /visits/{id}/notes  (clinical notes)
+                    +--> PATCH /visits/{id}  (diagnosis + treatment plan)
+                    |
+                    v
+               POST /prescriptions  (add medicines with dosage/frequency/duration)
+                    |
+               POST /visits/{id}/complete
+                    |
+               (visit snapshot saved to MongoDB)
+                    |
+                    v
+               POST /billing
+                    |
+                    +-[AUTO]-----> pulls medicine prices from prescription
+                    +-[MANUAL]---> reception adds custom line items
+                    |
+                    v
+               Apply discount + 18% tax --> Total calculated
+                    |
+               POST /billing/{id}/pay  (Cash / Card / UPI)
+                    |
+                    v
+               POST /dispensing  (pharmacist role required)
+                    |
+               FIFO batch selection --> stock deducted --> movement logged
+                    |
+                    v
+               Patient receives medicines + receipt
+               Token marked COMPLETED, removed from Redis queue
 ```
-
-### Dispensing Flow (FIFO)
-
-```mermaid
-graph LR
-    A[Prescription] --> B[Check Stock]
-    B --> C[Select Batch]
-    C --> D[FIFO Logic]
-    D --> E[Earliest Expiry]
-    E --> F[Deduct Stock]
-    F --> G[Log Movement]
-    G --> H[Dispense]
-```
-
-**FIFO Logic:**
-1. Query all batches for the medicine
-2. Filter out expired batches
-3. Sort by expiry date (earliest first)
-4. Select batch with sufficient quantity
-5. Deduct from that batch
-6. If insufficient, use next batch
 
 ---
 
-## 🔧 Development
+### Queue Internals (Redis)
+
+```
+Check-in / Walk-in
+      |
+      v
+INCR queue:counter:YYYY-MM-DD        --> token number (001, 002, ...)
+ZADD queue:YYYY-MM-DD score=now      --> add token to sorted set
+HSET queue:token:YYYY-MM-DD:NNN      --> store patient details + status=WAITING
+      |
+      v
+Queue Display (GET /queue/today)
+Shows: waiting | with_doctor | completed | skipped
+      |
+      v
+Doctor: POST /queue/next
+      |
+ZRANGE queue:date 0 0                --> get next token
+HSET ...status = WITH_DOCTOR
+SET queue:current:date = token_num   --> update display screen
+      |
+      v
+Consultation completes
+      |
+HSET ...status = COMPLETED
+ZREM queue:date token                --> remove from active queue
+```
+
+---
+
+### FIFO Dispensing Logic
+
+When a pharmacist dispenses medicines, the system selects stock batches in FIFO order (first to expire is dispensed first):
+
+```
+For each medicine in the prescription:
+      |
+      v
+SELECT batches WHERE medicine_id = X
+  AND quantity > 0
+  AND expiry_date > TODAY
+  ORDER BY expiry_date ASC          --> earliest expiry first
+      |
+      v
+Required quantity = dose × frequency × duration_days
+      |
+      v
+Enough in one batch?
+      |              |
+     Yes             No
+      |              |
+ Deduct all     Deduct from batch 1, carry remainder to next batch
+      |
+      v
+UPDATE medicine_batches SET quantity = quantity - dispensed
+INSERT stock_movements (type: OUT) into MongoDB
+      |
+      v
+Stock < reorder_level?  -->  GET /inventory/low-stock alert generated
+```
+
+---
+
+### Billing Modes
+
+**AUTO mode** — used when a prescription exists:
+```
+Fetch prescription_items joined with medicines
+    --> for each item: unit_price × quantity = line total
+    --> sum all lines = subtotal
+    --> subtotal - discount + (subtotal × 0.18 tax) = total
+```
+
+**MANUAL mode** — used for custom charges:
+```
+Reception adds line items manually:
+    - Consultation fee
+    - Procedure charges
+    - Lab or imaging fees
+    --> same discount + tax calculation
+    --> total calculated and invoice created
+```
+
+---
+
+## Development
 
 ### Project Structure
 
@@ -607,321 +765,132 @@ backend/
 
 ### Database Migrations
 
-**Create migration:**
 ```bash
+# Create a new migration
 alembic revision --autogenerate -m "add new table"
-```
 
-**Apply migrations:**
-```bash
+# Apply all migrations
 alembic upgrade head
-```
 
-**Rollback:**
-```bash
+# Rollback one step
 alembic downgrade -1
 ```
 
 ### Docker Commands
 
-**Start services:**
 ```bash
+# Start all services
 docker-compose up -d
-```
 
-**View logs:**
-```bash
+# View logs
 docker-compose logs -f
 docker logs clinic_db
 docker logs clinic_mongo
 docker logs clinic_redis
-```
 
-**Stop services:**
-```bash
+# Stop services
 docker-compose down
-```
 
-**Access database shells:**
-```bash
-# PostgreSQL
+# Access database shells
 docker exec -it clinic_db psql -U clinic_user -d clinic_db
-
-# MongoDB
 docker exec -it clinic_mongo mongosh "mongodb://clinic_admin:clinic_mongo_pass@localhost:27017/"
-
-# Redis
 docker exec -it clinic_redis redis-cli
 ```
 
-### Testing
-
-```bash
-# Run tests
-pytest
-
-# With coverage
-pytest --cov=app tests/
-```
-
-### Code Quality
-
-```bash
-# Format code
-black app/
-
-# Sort imports
-isort app/
-
-# Lint
-flake8 app/
-```
-
----
-
-## 🔒 Security
-
-### Authentication
-- JWT token-based authentication
-- Token expiration (30 minutes default)
-- Secure password hashing with bcrypt
-- Password validation (minimum length, complexity)
-
-### Authorization
-- Role-based access control (RBAC)
-- Endpoint-level permission checks
-- User context from JWT token
-
-### Data Protection
-- SQL injection prevention (SQLAlchemy ORM)
-- Input validation (Pydantic)
-- Environment variable configuration
-- Sensitive data never logged
-
-### Audit Trail
-- All actions logged to MongoDB
-- User, timestamp, and changes recorded
-- IP address tracking
-- Immutable audit logs
-
-### Best Practices
-- HTTPS in production
-- CORS middleware configured
-- Rate limiting (implement as needed)
-- Regular security audits
-- Dependency updates
-
----
-
-## 📊 Key Features Deep Dive
-
-### Real-Time Queue System
-
-The queue system uses Redis for high performance:
-
-**Data Structure:**
-- Sorted Set: Maintains queue order by timestamp
-- Hash: Stores patient details for each token
-- Counter: Generates unique token numbers
-- String: Tracks currently serving token
-
-**Operations:**
-- O(log N) for adding to queue
-- O(1) for getting next patient
-- O(1) for updating status
-
-**Benefits:**
-- Real-time updates
-- No database locking
-- Fast token generation
-- Persistent across restarts
-
-### FIFO Dispensing
-
-Medicine dispensing follows First-In-First-Out (FIFO) or more accurately, First-Expiry-First-Out:
-
-**Logic:**
-1. Query all batches for medicine
-2. Filter expired batches
-3. Sort by expiry date ascending
-4. Select batch with earliest expiry
-5. Deduct quantity
-6. Log movement to MongoDB
-
-**Benefits:**
-- Reduces medicine wastage
-- Prevents dispensing expired medicines
-- Automatic stock rotation
-- Complete audit trail
-
-### Automated Billing
-
-**AUTO Mode:**
-1. Fetch prescription details
-2. Get medicine prices from inventory
-3. Calculate subtotal (quantity × price)
-4. Apply discounts if any
-5. Calculate tax (18% GST)
-6. Generate invoice
-
-**MANUAL Mode:**
-1. Add custom line items
-2. Enter consultation fee
-3. Add procedure charges
-4. Calculate totals
-5. Generate invoice
-
-### Audit Logging
-
-Every significant action is logged:
-- User who performed action
-- Timestamp
-- Resource affected (type and ID)
-- Changes made (old → new values)
-- Result (success/failure)
-
-**Use cases:**
-- Compliance requirements
-- Security monitoring
-- Debugging
-- Performance analysis
-- Business intelligence
-
----
-
-## 🐳 Docker Setup
-
-### docker-compose.yml
+### Docker Compose Reference
 
 ```yaml
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: clinic_db
-    environment:
-      POSTGRES_USER: clinic_user
-      POSTGRES_PASSWORD: clinic_pass
-      POSTGRES_DB: clinic_db
     ports:
       - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
 
   mongodb:
     image: mongo:7
     container_name: clinic_mongo
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: clinic_admin
-      MONGO_INITDB_ROOT_PASSWORD: clinic_mongo_pass
     ports:
       - "27017:27017"
-    volumes:
-      - mongo_data:/data/db
 
   redis:
     image: redis:7-alpine
     container_name: clinic_redis
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
+```
 
-volumes:
-  postgres_data:
-  mongo_data:
-  redis_data:
+### Testing
+
+```bash
+pytest
+pytest --cov=app tests/
+```
+
+### Code Quality
+
+```bash
+black app/       # format
+isort app/       # sort imports
+flake8 app/      # lint
 ```
 
 ---
 
-## 📈 Performance Considerations
+## Security
 
-### Database Indexes
+### Authentication & Authorization
+- JWT bearer token required on all protected endpoints
+- Token expiry: 30 minutes (configurable via env)
+- Passwords hashed with bcrypt — never stored in plaintext
+- Role-based access checked at the endpoint level using the JWT payload
 
-**PostgreSQL:**
-- Primary keys on all tables
-- Foreign key indexes
-- Search indexes (patient name, phone)
-- Date indexes (appointments, visits)
+### Data Protection
+- SQLAlchemy ORM prevents SQL injection
+- All inputs validated by Pydantic before hitting business logic
+- Sensitive config (DB passwords, secret keys) stored in `.env`, never hardcoded
+- Sensitive data is never written to application logs
 
-**MongoDB:**
-- Timestamp indexes (audit_logs)
-- Patient ID + date (visit_history)
-- Medicine ID + timestamp (stock_movements)
-- Date unique index (daily_summaries)
+### Audit Trail
+- Every create/update/delete action writes to MongoDB `audit_logs`
+- Logs include: user ID + name + role, timestamp, resource type + ID, before/after values
+- Audit logs are append-only — no update or delete endpoints exposed
 
-### Caching Strategy
-
-- Redis for queue management
-- Session caching
-- Frequently accessed data
-- API response caching (future)
-
-### Query Optimization
-
-- Async database operations
-- Bulk inserts where possible
-- JOIN optimization
-- Pagination for large result sets
+### Production Checklist
+- Change `SECRET_KEY` to a strong random value
+- Enable HTTPS (reverse proxy via nginx or a cloud load balancer)
+- Restrict CORS origins to your frontend domain
+- Set up regular database backups
+- Ensure compliance with applicable healthcare data regulations (HIPAA, GDPR, etc.)
 
 ---
 
-## 🚧 Roadmap
+## Roadmap
 
-### Planned Features
-- [ ] SMS notifications for appointments
-- [ ] Email prescriptions to patients
-- [ ] Mobile app for doctors
-- [ ] Lab integration
-- [ ] Imaging integration (X-ray, MRI)
-- [ ] Telemedicine support
-- [ ] Patient portal
-- [ ] Insurance claims
+- [ ] SMS/email notifications for appointment reminders
+- [ ] Email prescriptions directly to patients
+- [ ] Patient portal (self-service booking and history)
+- [ ] Lab integration (send test orders, receive results)
+- [ ] Analytics dashboard (charts for revenue, visit trends, top diagnoses)
 - [ ] Multi-clinic support
-- [ ] Analytics dashboard
+- [ ] Insurance claims processing
+- [ ] Mobile app for doctors
 
 ---
 
-## 📄 License
-
-MIT License - Free to use, modify, and distribute.
-
----
-
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
+2. Create a feature branch (`git checkout -b feature/your-feature`)
+3. Commit your changes
+4. Push and open a Pull Request
 
 ---
 
-## 👨‍💻 Support
+## License
 
-For questions or issues:
-- Open an issue on GitHub
-- Email: support@qure-clinic.example
+MIT License — free to use, modify, and distribute.
 
 ---
 
-## 🙏 Acknowledgments
-
-Built with:
-- [FastAPI](https://fastapi.tiangolo.com/) - Modern Python web framework
-- [PostgreSQL](https://www.postgresql.org/) - Powerful relational database
-- [MongoDB](https://www.mongodb.com/) - Flexible document database
-- [Redis](https://redis.io/) - In-memory data store
-- [SQLAlchemy](https://www.sqlalchemy.org/) - SQL toolkit and ORM
-- [Pydantic](https://pydantic-docs.helpmanual.io/) - Data validation
-
----
-
-**⚠️ Important:** This system handles sensitive health data. Ensure compliance with healthcare regulations (HIPAA, GDPR, HITECH) before deployment in production. Implement proper backup strategies, access controls, and encryption.
-
----
-
-**Made with ❤️ for better healthcare management**
+> **Note:** This system handles sensitive health data. Ensure compliance with applicable healthcare regulations before deploying to production. Implement proper backup strategies, access controls, and encryption at rest.
